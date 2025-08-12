@@ -2,6 +2,7 @@
 import { Adb, AdbDaemonDevice, AdbSync, AdbDaemonTransport } from "@yume-chan/adb";
 import { ReadableStream, ReadableWritablePair } from "@yume-chan/stream-extra";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
+import { PackageManager } from "@yume-chan/android-bin";
 
 const statusDiv = document.getElementById('status')!;
 const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement;
@@ -196,13 +197,27 @@ uploadBtn.addEventListener('click', async () => {
     // Get ADB sync client
     const sync = await client.sync();
 
-    // Upload all files
-    for (const file of selectedFiles) {
-      await uploadFile(sync, file);
-    }
+    // Check if we are installing APKs
+    const isApkInstall = selectedFiles.every(file => file.name.toLowerCase().endsWith('.apk'))
 
-    statusText.textContent = 'All files uploaded successfully!';
-    statusText.className = 'status-text success';
+    if (isApkInstall) {
+      if (selectedFiles.length === 1) {
+        await installSingleApk(client, selectedFiles[0]);
+      } else {
+        await installSplitApk(client, sync, selectedFiles);
+      }
+
+      statusText.textContent = 'App installed successfully!';
+      statusText.className = 'status-text success';
+    } else {
+    // Upload all files
+      for (const file of selectedFiles) {
+        await uploadFile(sync, file);
+      }
+
+      statusText.textContent = 'All files uploaded successfully!';
+      statusText.className = 'status-text success';
+    }
 
     // Reset selection
     selectedFiles = [];
@@ -270,6 +285,58 @@ async function uploadFile(sync: AdbSync, file: File) {
     statusText.className = 'status-text error';
     throw error;
   }
+}
+
+async function installSingleApk(client: Adb, apkFile: File) {
+  statusText.textContent = `Installing: ${apkFile.name}...`;
+  statusText.className = 'status-text';
+  let uploaded = 0;
+
+  try {
+    const stream = apkFile.stream();
+    const apkSize = apkFile.size;
+    const pm = new PackageManager(client);
+
+    // Create readable stream from APK
+    const progressTrackingStream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const reader = stream.getReader();
+        while(true) {
+          const {done, value} = await reader.read();
+          if(done) {
+            controller.close();
+            break;
+          }
+
+          // Track uploaded bytes
+          uploaded += value.byteLength;
+          const progress = Math.round((uploaded / apkSize) * 100);
+          progressBar.style.width = `${progress}%`;
+
+          // Pass through the data
+          controller.enqueue(value);
+        }
+
+      }
+    });
+    // Feed into pm installer
+    await pm.installStream(apkSize, progressTrackingStream);
+  } catch(error) {
+    console.error('Installation error:', error);
+    statusText.textContent = `Installation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    statusText.className = 'status-text error';
+    throw error;
+  }
+}
+
+async function installSplitApk(client: Adb, sync: AdbSync, apkFiles: File[]) {
+  console.log("Client: ", client);
+  console.log("Sync status: ", sync);
+  console.log("Files: ", apkFiles);
+  statusText.textContent = 'Split APK Not Implemented, TODO!';
+  statusText.className = 'status-text not implemented';
 }
 
 // Manual device connection trigger
