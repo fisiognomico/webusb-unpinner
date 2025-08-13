@@ -1,6 +1,6 @@
-  import { AdbDaemonWebUsbDevice, AdbDaemonWebUsbDeviceObserver, AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
+import { AdbDaemonWebUsbDevice, AdbDaemonWebUsbDeviceObserver, AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
 import { Adb, AdbDaemonDevice, AdbSync, AdbDaemonTransport } from "@yume-chan/adb";
-import { ReadableStream, ReadableWritablePair } from "@yume-chan/stream-extra";
+import { ReadableStream, TextDecoderStream, WritableStream } from "@yume-chan/stream-extra";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import { PackageManager } from "@yume-chan/android-bin";
 
@@ -13,6 +13,10 @@ const progressBar = document.getElementById('progressBar') as HTMLDivElement;
 const statusText = document.getElementById('statusText')!;
 const fileList = document.getElementById('fileList')!;
 let fileInput = document.getElementById('fileInput') as HTMLInputElement;
+const uninstallSection = document.getElementById('uninstallSection') as HTMLDivElement;
+const appList = document.getElementById('appList') as HTMLSelectElement;
+const uninstallBtn = document.getElementById('uninstallBtn') as HTMLButtonElement;
+const refreshBtn = document.getElementById('refreshBtn') as HTMLButtonElement;
 
 // Browser compatibility check
 if (!navigator.usb) {
@@ -36,10 +40,13 @@ function updateStatus(devices: readonly AdbDaemonDevice[] = []) {
     statusDiv.textContent = 'ADB enabled - Device connected';
     statusDiv.className = 'status enabled';
     uploadSection.style.display = 'block';
+    uninstallSection.style.display = 'block';
+    loadInstalledApps(); // Load apps when device is connected
   } else {
     statusDiv.textContent = 'No ADB device connected';
     statusDiv.className = 'status disabled';
     uploadSection.style.display = 'none';
+    uninstallSection.style.display = 'none';
     selectedFiles = [];
     renderFileList();
   }
@@ -130,8 +137,6 @@ fileInput.addEventListener('change', () => {
   renderFileList();
   uploadBtn.disabled = false;
 
-  // Reset the input to allow selecting the same file again
-  // fileInput.value = '';
 });
 
 // Reset the input only after successful upload
@@ -391,6 +396,137 @@ async function installSplitApk(client: Adb, sync: AdbSync, apkFiles: File[]) {
   statusText.textContent = 'Split APK Not Implemented, TODO!';
   statusText.className = 'status-text not implemented';
 }
+
+/** =============================
+ *        REINSTALL APK
+ *  =============================
+ */
+
+async function loadInstalledApps() {
+  if (!adbClient) return;
+
+  appList.innerHTML = '<option value="" disabled selected>Loading applications...</option>';
+  uninstallBtn.disabled = true;
+  refreshBtn.disabled = true;
+
+  try {
+    // Directly use pm -3 for third-party apps
+    const shell = await adbClient.subprocess.shellProtocol!.spawn(['pm', 'list', 'packages', '-3']);
+    var output: string = "";
+    // Stdout and stderr will generate two Promise, await them together
+    await Promise.all([
+      shell.stdout.pipeThrough(new TextDecoderStream()).pipeTo(
+        new WritableStream({
+          write(chunk) {
+            output = chunk;
+          },
+        }),
+      ),
+      shell.stderr.pipeThrough(new TextDecoderStream()).pipeTo(
+        new WritableStream({
+          write(chunk) {
+            console.error(["[*] PM LIST ERR ", chunk]);
+          },
+        }),
+      ),
+    ]);
+
+    const exitCode = await shell.exited;
+
+    if (exitCode !== 0) {
+      throw new Error('Failed to list applications');
+    }
+
+    // Parse package names, pm ouput include package:
+    const packages = output.split('\n')
+      .filter(line => line.startsWith('package:'))
+      .map(line => line.substring(8).trim());
+
+    if (packages.length === 0) {
+      appList.innerHTML = '<option value="" disabled>No third-party apps found</option>';
+      return;
+    }
+
+    // Clear and populate app list
+    appList.innerHTML = '';
+    packages.forEach(pkg => {
+      const option = document.createElement('option');
+      option.value = pkg;
+      option.textContent = pkg;
+      appList.appendChild(option);
+    });
+
+    // Enable controls
+    uninstallBtn.disabled = false;
+    refreshBtn.disabled = false;
+
+  } catch (error) {
+    console.error('Error loading applications:', error);
+    appList.innerHTML = '<option value="" disabled>Error loading applications</option>';
+  }
+}
+
+async function uninstallSelectedApp() {
+  const packageName = appList.value;
+  if (!packageName || !adbClient) return;
+
+  uninstallBtn.disabled = true;
+  refreshBtn.disabled = true;
+  statusText.textContent = `Uninstalling ${packageName}...`;
+  statusText.className = 'status-text';
+
+  try {
+    const shell = await adbClient.subprocess.shellProtocol!.spawn(['pm', 'uninstall', packageName]);
+    var output: string = "";
+    // TODO uniform in a function ex spawn command
+    // Stdout and stderr will generate two Promise, await them together
+    await Promise.all([
+      shell.stdout.pipeThrough(new TextDecoderStream()).pipeTo(
+        new WritableStream({
+          write(chunk) {
+            output = chunk;
+          },
+        }),
+      ),
+      shell.stderr.pipeThrough(new TextDecoderStream()).pipeTo(
+        new WritableStream({
+          write(chunk) {
+            console.log(["[*] PM LIST ERR ", chunk]);
+          },
+        }),
+      ),
+    ]);
+
+    const exitCode = await shell.exited;
+
+    if (exitCode !== 0) {
+      throw new Error(`Uninstall failed: ${output}`);
+    }
+
+    statusText.textContent = `Uninstalled: ${packageName}`;
+    statusText.className = 'status-text success';
+
+    // Refresh app list
+    await loadInstalledApps();
+
+  } catch (error) {
+    console.error('Uninstall error:', error);
+    statusText.textContent = `Uninstall failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    statusText.className = 'status-text error';
+    uninstallBtn.disabled = false;
+    refreshBtn.disabled = false;
+  }
+}
+
+
+refreshBtn.addEventListener('click', loadInstalledApps);
+uninstallBtn.addEventListener('click', uninstallSelectedApp);
+appList.addEventListener('change', () => {
+  uninstallBtn.disabled = !appList.value;
+});
+
 
 // Manual device connection trigger
 connectBtn.addEventListener('click', async () => {
