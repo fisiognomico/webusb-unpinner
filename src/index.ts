@@ -34,11 +34,18 @@ if (!navigator.usb) {
 // State management
 let observer: AdbDaemonWebUsbDeviceObserver | null = null;
 let selectedFiles: File[] = [];
-const UPLOAD_PATH = '/sdcard/Downloads/web-uploads/';
+const FILE_UPLOAD_PATH = '/sdcard/Downloads/web-uploads/';
+const APK_UPLOAD_PATH = '/data/local/tmp/';
 
 interface ProcessOutput {
   output: string;
   exitCode: number;
+}
+
+interface ApkDescriptor {
+  name: string,
+  path: string,
+  size: number
 }
 
 function updateStatus() {
@@ -306,7 +313,7 @@ async function uploadFile(sync: AdbSync, file: File) {
   statusText.className = 'status-text';
   progressBar.style.width = '0%';
 
-  const filePath = `${UPLOAD_PATH}${file.name}`;
+  const filePath = `${FILE_UPLOAD_PATH}${file.name}`;
   const fileSize = file.size;
   let uploaded = 0;
 
@@ -399,11 +406,77 @@ async function installSingleApk(client: Adb, apkFile: File) {
 }
 
 async function installSplitApk(client: Adb, sync: AdbSync, apkFiles: File[]) {
-  console.log("Client: ", client);
-  console.log("Sync status: ", sync);
-  console.log("Files: ", apkFiles);
-  statusText.textContent = 'Split APK Not Implemented, TODO!';
-  statusText.className = 'status-text not implemented';
+  statusText.textContent = 'Starting split APK installation...';
+  statusText.className = 'status-text';
+
+  try {
+    // Upload files and collect remote paths
+    const remotePaths: ApkDescriptor[] = [];
+    let totalSize = 0;
+    for (const file of apkFiles) {
+      const remotePath = `${APK_UPLOAD_PATH}${file.name}`;
+      await uploadFile(sync, file);
+      remotePaths.push({
+        name: file.name,
+        path: remotePath,
+        size: file.size,
+      });
+      totalSize += file.size;
+    }
+
+
+    // Create session and write each APK
+    const sessionId = await createInstallSession(client, totalSize);
+    for (const [idx, apk] of remotePaths.entries()) {
+      await writeToInstallSession(client, apk, sessionId, idx);
+    }
+
+    // Commit the installation
+    await commitInstallSession(client, sessionId);
+
+    statusText.textContent = 'Split APK installed successfully!';
+    statusText.className = 'status-text success';
+  } catch (error) {
+    console.error('Split installation error: ', error);
+    statusText.textContent = `Split installation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    statusText.className = 'status-text error';
+    throw error;
+  }
+}
+
+async function createInstallSession(client: Adb, totalSize: number): Promise<number> {
+  const adbCommand = ["pm", "install-create", "-S", totalSize.toString()];
+  const {output, exitCode} = await adbRun(client!, adbCommand);
+
+  const match = output.match(/Success: created install session \[(\d+)\]/);
+  if (!match) {
+    throw new Error('Failed to parse session ID from output: ' + output);
+  }
+
+  return parseInt(match[1], 10);
+
+}
+
+async function writeToInstallSession( client: Adb, apk: ApkDescriptor, sessionId: number, idx: number)
+{
+  const adbCommand = ["pm", "install-write", "-S", apk.size.toString(), sessionId.toString(),
+    idx.toString(), apk.path];
+  const {output, exitCode} = await adbRun(client, adbCommand);
+
+  if (exitCode !== 0 ) {
+    throw new Error(`Failed to write ${apk.name} to session (code ${exitCode}): ${output}`);
+  }
+}
+
+async function commitInstallSession(client: Adb, sessionId: number) {
+  const adbCommand = ['pm', 'install-commit', sessionId.toString()];
+  const {output, exitCode} = await adbRun(client, adbCommand);
+
+  if (exitCode !== 0) {
+    throw new Error(`Failed to commit session (code ${exitCode}): ${output}`);
+  }
 }
 
 /** =============================
@@ -434,7 +507,6 @@ async function loadInstalledApps() {
     if (exitCode !== 0) {
       throw new Error('Failed to list applications');
     }
-
     // Parse package names, pm ouput include package:
     const packages = output.split('\n')
       .filter(line => line.startsWith('package:'))
@@ -568,8 +640,6 @@ async function backupApk(client: Adb, packageName: string) {
       downloadStatus.textContent = `Downloading APK (${i+1}/${apkPaths.length})...`;
 
       const data = await downloadFile(sync!, path, (progress) => {
-        // TODO mache cazzo e' sta roba
-        const fileProgress = Math.round(progress * 100);
         const totalProgress = Math.round(((i + progress) / apkPaths.length) * 100);
         downloadProgressBar.style.width = `${totalProgress}%`;
         setDeviceState({ downloadProgress: totalProgress });
