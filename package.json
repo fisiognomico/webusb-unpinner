@@ -6,6 +6,7 @@
     "@yume-chan/android-bin": "^2.1.0",
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1"
+    "@chromeos/android-package-signer": "file:../android-package-sign-js",
   },
   "devDependencies": {
     "@types/file-saver": "^2.0.7",

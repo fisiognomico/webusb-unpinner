@@ -121,7 +121,7 @@ async function initializeObserver() {
       console.log('Device disconnected:', devices);
     });
 
-    // TODO not really needed
+    // TODO store in general state
     return observer;
   } catch (error) {
     console.error('Observer initialization failed:', error);
