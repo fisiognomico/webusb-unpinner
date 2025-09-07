@@ -28,7 +28,7 @@ export const getDeviceState = () => ({ ...deviceState });
 
 export const setDeviceState = (updates: Partial<DeviceState>) => {
   deviceState = { ...deviceState, ...updates };
-  console.log('Device state updated: ', deviceState);
+  // console.log('Device state updated: ', deviceState);
 };
 
 export const connectToDevice = async(): Promise<Adb | null> => {

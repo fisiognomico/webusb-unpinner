@@ -1,12 +1,13 @@
 {
   "dependencies": {
+    "@chromeos/android-package-signer": "file:../android-package-sign-js",
     "@yume-chan/adb-credential-web": "^2.1.0",
     "@yume-chan/adb-daemon-webusb": "^2.1.0",
     "@yume-chan/adb-scrcpy": "^2.1.1",
     "@yume-chan/android-bin": "^2.1.0",
+    "buffer": "^6.0.3",
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1"
-    "@chromeos/android-package-signer": "file:../android-package-sign-js",
   },
   "devDependencies": {
     "@types/file-saver": "^2.0.7",

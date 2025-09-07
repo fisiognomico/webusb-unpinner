@@ -6,6 +6,7 @@ import JSZip from "jszip";
 import { saveAs } from 'file-saver';
 
 import {getDeviceState, setDeviceState, connectToDevice, disconnectDevice, initializeCredentials} from "./state";
+import {signApk} from "./signer";
 
 const statusDiv = document.getElementById('status')!;
 const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement;
@@ -653,7 +654,14 @@ async function backupApk(client: Adb, packageName: string) {
 
     if(apkFiles.length === 1) {
       const apkFileType = 'application/vnd.android.package-archive';
-      saveAs( new Blob([apkFiles[0].data as BlobPart], {type: apkFileType}));
+      // Test APK resign only with single APKs for the moment
+      var zipFile = new File([apkFiles[0].data as BlobPart], baseFilename + ".apk");
+      var b64outZip = await signApk(zipFile);
+      // strip data:application/zip;base64,
+      b64outZip = b64outZip.split(",")[1];
+      const resignedApk = Uint8Array.from(atob(b64outZip), c => c.charCodeAt(0));
+      // saveAs( new Blob([apkFiles[0].data as BlobPart], {type: apkFileType}));
+      saveAs( new Blob([resignedApk as BlobPart], {type: apkFileType}));
     } else {
       // Multiple APKs installation
       const zip = new JSZip();
