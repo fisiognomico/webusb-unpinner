@@ -20,7 +20,12 @@ module.exports = {
     extensions: ['.ts', '.js'],
     alias: {
       'android-package-sign-js': path.resolve(__dirname, '../android-package-sign-js'),
-      'readline': false
+      'readline': false,
+      'util': require.resolve('./polyfills/util.js'),
+    },
+    fallback: {
+      "assert": false,
+      "util": false,
     }
   },
   output: {
@@ -43,6 +48,12 @@ module.exports = {
       ),
       __NODE_ENV__: JSON.stringify(process.env.NODE_ENV || 'development'),
     }),
-
+    new webpack.DefinePlugin({
+      'global.debuglog': `(function() {
+        return function() {
+          return function() {};  // No-op function
+        };
+      })()`,
+    }),
   ]
 };
