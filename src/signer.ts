@@ -1,4 +1,4 @@
-import { ApkSignerV2 } from "@chromeos/android-package-signer";
+import { ApkSignerV2 } from "android-package-signer";
 
 export interface CertInstance {
   password: string,

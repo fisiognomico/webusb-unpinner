@@ -33,6 +33,12 @@ module.exports = {
     path: path.resolve(__dirname, 'dist'),
     publicPath: '/'
   },
+  externals: {
+    'readline': 'readline',
+    'net': 'net',
+    'tls': 'tls',
+    'fs': 'fs',
+  },
   devServer: {
     static: path.join(__dirname, 'dist'),
     port: 9000,
@@ -49,9 +55,9 @@ module.exports = {
       __NODE_ENV__: JSON.stringify(process.env.NODE_ENV || 'development'),
     }),
     new webpack.DefinePlugin({
-      'global.debuglog': `(function() {
-        return function() {
-          return function() {};  // No-op function
+      'global.debuglog': `(function(val) {
+        return function(val) {
+          return function(val) {};  // No-op function
         };
       })()`,
     }),

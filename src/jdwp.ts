@@ -1,5 +1,5 @@
 import {AdbDaemonWebUsbDeviceManager} from "@yume-chan/adb-daemon-webusb";
-import {DebugManager, WebUSBConfig} from "jdwp";
+import {DebugManager, WebUSBConfig} from "libjdwp";
 import {DeviceState} from "./state";
 
 export async function initFridaGadget(state: DeviceState, targetApp: string): Promise<void> {
@@ -13,7 +13,7 @@ export async function initFridaGadget(state: DeviceState, targetApp: string): Pr
             deviceSerial: state.device!.serial!,
             adb: state.client!
         };
-        const debugManager = new DebugManager(config);
+        const debugManager = new DebugManager<WebUSBConfig>(config);
 
         // Set app in debug mode
         const setPackageDebugMode = `am set-debug-app -w ${targetApp}`;

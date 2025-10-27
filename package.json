@@ -4,16 +4,16 @@
     "build:browser": "webpack"
   },
   "dependencies": {
-    "@chromeos/android-package-signer": "file:../android-package-sign-js",
     "@yume-chan/adb-credential-web": "^2.1.0",
     "@yume-chan/adb-daemon-webusb": "^2.1.0",
     "@yume-chan/adb-scrcpy": "^2.1.1",
     "@yume-chan/android-bin": "^2.1.0",
-    "binary-xml": "^0.0.1",
+    "android-package-signer": "^0.2.0",
+    "binary-xml": "npm:binary-xml-js@^0.0.2",
     "buffer": "^6.0.3",
     "file-saver": "^2.0.5",
-    "jdwp": "file:../jdwp",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "libjdwp": "^0.1.5"
   },
   "devDependencies": {
     "@types/binary-xml": "^0.0.4",
