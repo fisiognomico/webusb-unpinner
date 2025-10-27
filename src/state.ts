@@ -1,6 +1,8 @@
-import { Adb, AdbDaemonDevice, AdbDaemonConnection, AdbDaemonTransport, AdbPacketData, AdbPacketInit} from "@yume-chan/adb";
-import { Consumable, ReadableWritablePair } from "@yume-chan/stream-extra";
+import { Adb, AdbDaemonDevice, AdbDaemonConnection, AdbDaemonTransport} from "@yume-chan/adb";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
+// import { Consumable, ReadableWritablePair } from "@yume-chan/stream-extra";
+import { AdbManager } from "./adb-manager";
+import { config } from "./config";
 
 export interface DeviceState {
   device: AdbDaemonDevice | null;
@@ -11,6 +13,7 @@ export interface DeviceState {
   isAuthenticating: boolean;
   error: string | null;
   isDownloading: boolean;
+  isConfigured: boolean;
   downloadProgress: number;
 }
 
@@ -23,6 +26,7 @@ let deviceState: DeviceState  = {
   isAuthenticating: false,
   error: null,
   isDownloading: false,
+  isConfigured: false,
   downloadProgress: 0
 };
 
@@ -114,5 +118,45 @@ export const initializeCredentials = () => {
   const state = getDeviceState();
   if(!state.credentials) {
     setDeviceState({ credentials: new AdbWebCredentialStore() });
+  }
+};
+
+export const configureDevice = async ()  => {
+  const state = getDeviceState();
+  if(state.isConfigured) {
+    return;
+  } else {
+    try {
+      /* Check presence of the necessary files:
+       * Frida Gadget and config
+       * Unpinning script + hide debugger
+       */
+      const adbManager = new AdbManager(state.client!);
+
+      // Check if the scripts folder exists
+      const scriptFolder = config.devicePath + 'scripts/';
+      const folderStatus = await adbManager.adbRun(["ls", scriptFolder]);
+      if (folderStatus.exitCode !== 0 ) {
+        console.log(`[configureDevice] creating folder ${scriptFolder}`);
+        const mkdirStatus = await adbManager.adbRun(["mkdir", scriptFolder]);
+        if (mkdirStatus.exitCode !== 0 ) {
+          throw new Error(`Failed to create directory ${scriptFolder} : ${mkdirStatus.output}`);
+        }
+      }
+      const files = [
+        'libgadget.so',
+        'libgadget.config.so',
+        'scripts/hide-debugger.js',
+        'scripts/httptoolkit-unpinner.js',
+      ];
+
+      const results = await Promise.all(
+        files.map(f => adbManager.pushIfNotPresent(f))
+      );
+    } catch (error) {
+      console.error("Error during device configuration", error);
+    } finally {
+      setDeviceState({ isConfigured: true });
+    }
   }
 };

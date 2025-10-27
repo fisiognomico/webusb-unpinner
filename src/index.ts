@@ -5,7 +5,7 @@ import { PackageManager } from "@yume-chan/android-bin";
 import JSZip from "jszip";
 import { saveAs } from 'file-saver';
 
-import { getDeviceState, setDeviceState, connectToDevice, disconnectDevice, initializeCredentials } from "./state";
+import { getDeviceState, setDeviceState, connectToDevice, disconnectDevice, initializeCredentials, configureDevice } from "./state";
 import { signApk } from "./signer";
 import {adbRun, downloadFile, getAPKPaths, reinstallApk} from "./adb-utils";
 import { initFridaGadget } from "./jdwp";
@@ -52,7 +52,7 @@ interface ApkFile {
     data: Uint8Array
 }
 
-function updateStatus() {
+async function updateStatus() {
   const state = getDeviceState();
 
   if (state.device) {
@@ -73,9 +73,12 @@ function updateStatus() {
     uploadSection.style.display = 'block';
     uninstallSection.style.display = 'block';
 
-    // Load apps only when fully connected
+    // Configure device an load apps only when fully connected
     if (state.isConnected && !state.isAuthenticating) {
-      loadInstalledApps();
+      statusDiv.textContent = 'Configuring device - Please wait...';
+      await configureDevice();
+      statusDiv.textContent = 'Device configured!';
+      await loadInstalledApps();
     }
   } else {
     statusDiv.textContent = 'No ADB device connected';
@@ -104,7 +107,7 @@ async function initializeObserver() {
     if(hasDevices) {
       setDeviceState({ device: observer.current[0] });
     }
-    updateStatus();
+    await updateStatus();
 
     // Listen for device list changes
     observer.onListChange(devices => {
@@ -125,12 +128,12 @@ async function initializeObserver() {
       console.log('Device disconnected:', devices);
     });
 
-    // TODO store in general state
+    // TODO store in general state?
     return observer;
   } catch (error) {
     console.error('Observer initialization failed:', error);
     setDeviceState({ error: 'Failed to initialize device observer' });
-    updateStatus();
+    await updateStatus();
     return null;
   }
 }
@@ -576,7 +579,6 @@ async function uninstallSelectedApp() {
     statusText.textContent = `Uninstalled: ${packageName}`;
     statusText.className = 'status-text success';
 
-    // TODO patch Apk
     const zip = new JSZip();
     const loaded = await zip.loadAsync(apkFiles[0].data);
     if (!loaded.files['AndroidManifest.xml']) {

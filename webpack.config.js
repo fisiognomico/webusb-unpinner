@@ -40,9 +40,22 @@ module.exports = {
     'fs': 'fs',
   },
   devServer: {
-    static: path.join(__dirname, 'dist'),
+    static: [
+      {
+        directory: path.join(__dirname, 'dist'),
+        publicPath: '/',
+      },
+      {
+        directory: path.join(__dirname, 'static'),
+        publicPath: '/static/',
+      },
+
+    ],
     port: 9000,
     hot: true,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+    },
   },
   plugins: [
     new HtmlWebpackPlugin({
@@ -50,9 +63,10 @@ module.exports = {
     }),
     new webpack.DefinePlugin({
       __BACKEND_URL__: JSON.stringify(
-        process.env.BACKEND_URL || 'http://localhost:3000'
+        process.env.BACKEND_URL || 'http://localhost:9000/'
       ),
       __NODE_ENV__: JSON.stringify(process.env.NODE_ENV || 'development'),
+      __DEVICE_PATH__: JSON.stringify(process.env.DEVICE_PATH || '/data/local/tmp/'),
     }),
     new webpack.DefinePlugin({
       'global.debuglog': `(function(val) {
