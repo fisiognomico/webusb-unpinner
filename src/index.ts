@@ -127,7 +127,6 @@ async function initializeObserver() {
       console.log('Device disconnected:', devices);
     });
 
-    // TODO store in general state?
     return observer;
   } catch (error) {
     console.error('Observer initialization failed:', error);
@@ -351,6 +350,16 @@ async function loadInstalledApps() {
 }
 
 async function uninstallSelectedApp() {
+  const confirmed = confirm(
+    `⚠️  WARNING:\n\n` +
+    `• App data will be lost\n` +
+    `• AndroidManifest will be modified\n` +
+    `• Frida gadget will be injected\n` +
+    `• App will be reinstalled\n\n` +
+    `This cannot be undone. Continue?`
+  );
+  if(!confirmed) return;
+
   const packageName = appList.value;
   if (!packageName) return;
   let adbManager: AdbManager | null = null;
@@ -370,7 +379,7 @@ async function uninstallSelectedApp() {
 
   // TODO show a WARNING that this will delete app's data
   downloadSection.style.display = 'block';
-  downloadSection.textContent = `Preparing to download ${packageName}...`;
+  downloadSection.textContent = `Preparing to reinstall ${packageName}...`;
 
   try {
     const apkFiles = await backupApk(adbManager, packageName);
