@@ -5,11 +5,11 @@ import { PackageManager } from "@yume-chan/android-bin";
 import JSZip from "jszip";
 import { saveAs } from 'file-saver';
 
-import { getDeviceState, setDeviceState, connectToDevice, disconnectDevice, initializeCredentials, configureDevice } from "./state";
+import { DeviceState, getDeviceState, setDeviceState, connectToDevice, disconnectDevice, initializeCredentials, configureDevice } from "./state";
 import { signApk } from "./signer";
 import { AdbManager } from "./adb-manager";
 import { initFridaGadget } from "./jdwp";
-import { enableDebuggableFlag } from "./apk-patcher";
+import { enableDebuggableFlag, getPackageName } from "./apk-patcher";
 
 const statusDiv = document.getElementById('status')!;
 const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement;
@@ -139,10 +139,8 @@ async function initializeObserver() {
 // File selection handling
 uploadArea.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => {
-  console.log('[DEBUG] File input change event triggered');
 
   if (!fileInput.files || fileInput.files.length === 0) {
-    console.log('[DEBUG] No files selected');
     return;
   }
 
@@ -152,7 +150,6 @@ fileInput.addEventListener('change', () => {
     selectedFiles.push(fileInput.files[i]);
   }
 
-  console.log(`[DEBUG] Selected ${selectedFiles.length} files`);
   renderFileList();
   uploadBtn.disabled = false;
 
@@ -186,6 +183,96 @@ function resetFileInput() {
   uploadBtn.disabled = true;
 }
 
+/**
+ * Unified workflow: patch manifest in ALL APKs + sign all APKs
+ * Returns signed APK data ready for installation
+ */
+async function patchAndSignApks(
+  apkFiles: ApkFile[],
+  packageName: string
+): Promise<Uint8Array[]> {
+  const signedApks: Uint8Array[] = [];
+
+  // Patch and sign each APK individually
+  for (let i = 0; i < apkFiles.length; i++) {
+    const apkFile = apkFiles[i];
+
+    // Load and patch this APK's manifest
+    const zip = new JSZip();
+    const loaded = await zip.loadAsync(apkFile.data);
+
+    if (!loaded.files['AndroidManifest.xml']) {
+      throw new Error(`AndroidManifest.xml not found in APK: ${apkFile.path}`);
+    }
+
+    const manifestBuffer = await loaded.files['AndroidManifest.xml'].async('arraybuffer');
+    const modifiedManifest = enableDebuggableFlag(manifestBuffer);
+    loaded.file('AndroidManifest.xml', modifiedManifest);
+
+    const patchedApk = await loaded.generateAsync({
+      type: 'arraybuffer',
+      compression: 'DEFLATE'
+    });
+
+    const patchedApkArray = new Uint8Array(patchedApk);
+    console.log(`💾 Patched APK ${i}: ${apkFile.path}`);
+
+    // Sign this APK
+    const signed = await signApk(patchedApkArray, `${packageName}_${i}.apk`);
+    signedApks.push(signed);
+  }
+
+  return signedApks;
+}
+
+
+/**
+ * Unified workflow: install APKs and initialize Frida
+ */
+async function installAndInstrumentApp(
+  adbManager: AdbManager,
+  signedApks: Uint8Array[],
+  packageName: string,
+  state: DeviceState
+): Promise<void> {
+  statusText.textContent = `Installing ${packageName}...`;
+  statusText.className = 'status-text';
+
+  if (signedApks.length === 1) {
+    // Single APK - install as bundle
+    const remotePath = `${APK_UPLOAD_PATH}${packageName}.apk`;
+    await adbManager.installApk(signedApks[0], remotePath);
+  } else {
+    // Multiple APKs - convert to Files and install as split
+    const apkFiles: File[] = signedApks.map((data, idx) => 
+      new File([data as BlobPart], `${packageName}_${idx}.apk`, { type: 'application/vnd.android.package-archive' })
+    );
+    await adbManager.installSplitApk(apkFiles);
+  }
+
+  statusText.textContent = `Installed: ${packageName}`;
+  statusText.className = 'status-text success';
+
+  // Initialize Frida Gadget
+  console.log('Loading Frida gadget...');
+  await initFridaGadget(state, packageName);
+  statusText.textContent = "Loaded frida gadget!";
+  statusText.className = 'status-text success';
+}
+
+
+
+/**
+ * Extract AndroidManifest.xml from APK file
+ */
+async function extractManifestFromApk(apkData: Uint8Array): Promise<ArrayBuffer> {
+  const zip = new JSZip();
+  const loaded = await zip.loadAsync(apkData);
+  if (!loaded.files['AndroidManifest.xml']) {
+    throw new Error('AndroidManifest.xml not found in APK');
+  }
+  return loaded.files['AndroidManifest.xml'].async('arraybuffer');
+}
 
 uploadArea.addEventListener('dragover', (e) => {
   e.preventDefault();
@@ -276,9 +363,9 @@ uploadBtn.addEventListener('click', async () => {
     const isApkInstall = selectedFiles.every(file => file.name.toLowerCase().endsWith('.apk'))
 
     if (isApkInstall) {
-        statusText.textContent = `Installing: ${selectedFiles.length} packets...`;
-        statusText.className = 'status-text';
-        await adbManager.installSplitApk(selectedFiles);
+      statusText.textContent = `Installing: ${selectedFiles.length} packets...`;
+      statusText.className = 'status-text';
+      await adbManager.installSplitApk(selectedFiles);
 
       statusText.textContent = 'App installed successfully!';
       statusText.className = 'status-text success';
@@ -377,14 +464,13 @@ async function uninstallSelectedApp() {
   statusText.textContent = `Uninstalling ${packageName}...`;
   statusText.className = 'status-text';
 
-  // TODO show a WARNING that this will delete app's data
   downloadSection.style.display = 'block';
   downloadSection.textContent = `Preparing to reinstall ${packageName}...`;
 
   try {
     const apkFiles = await backupApk(adbManager, packageName);
 
-    // Now I can uninstall the app
+    // Uninstall the original app
     const adbCommand = ['pm', 'uninstall', packageName];
     const {output, exitCode} = await adbManager.adbRun(adbCommand);
 
@@ -394,39 +480,8 @@ async function uninstallSelectedApp() {
     statusText.textContent = `Uninstalled: ${packageName}`;
     statusText.className = 'status-text success';
 
-    const zip = new JSZip();
-    const loaded = await zip.loadAsync(apkFiles[0].data);
-    if (!loaded.files['AndroidManifest.xml']) {
-      throw new Error('AndroidManifest.xml not found in APK');
-    }
-    const manifestBuffer = await loaded.files['AndroidManifest.xml'].async('arraybuffer');
-
-    const modifiedManifest = enableDebuggableFlag(manifestBuffer);
-
-    loaded.file('AndroidManifest.xml', modifiedManifest);
-
-    const patchedApk = await loaded.generateAsync({
-      type: 'arraybuffer',
-      compression: 'DEFLATE'
-    });
-    console.log(`💾 Patched APK... `);
-    const patchedApkArray = new Uint8Array(patchedApk);
-
-    // TODO support SPLIT APKS!
-    const resignedApk = await signApk(patchedApkArray, packageName + ".apk");
-    statusText.textContent = `Resigned: ${packageName}`;
-    statusText.className = 'status-text success';
-
-    // Reinstall resigned APK
-    const remotePath = `${APK_UPLOAD_PATH}/app.apk`;
-    await  adbManager.installApk(resignedApk, remotePath);
-    statusText.textContent = `Reinstalled: ${packageName}`;
-    statusText.className = 'status-text success';
-
-    // Now let's try to load Frida Gadget
-    await initFridaGadget(state, packageName);
-    statusText.textContent = "Loaded frida gadget!";
-    statusText.className = 'status-text success';
+    const signedApks = await patchAndSignApks(apkFiles, packageName);
+    await installAndInstrumentApp(adbManager, signedApks, packageName, state);
 
     // Refresh app list
     await loadInstalledApps();

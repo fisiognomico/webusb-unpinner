@@ -1,5 +1,6 @@
 /**
  * CHUNK WRAPPER CLASSES - Port of Frida's approach
+ * https://github.com/frida/frida-tools/blob/main/frida_tools/apk.py
  * Each chunk wraps its binary data and knows how to modify itself
  */
 
@@ -230,8 +231,7 @@ class ResourceMapChunk {
   add_debuggable(stringIndex: number): void {
     // The resource map maps string indices to resource IDs
     // For debuggable, we use the standard Android attribute resource ID
-    // const DEBUGGABLE_RESOURCE_ID = 0x010100d9; // android:debuggable
-    const DEBUGGABLE_RESOURCE_ID = 0x101000F; // android:debuggable
+    const DEBUGGABLE_RESOURCE_ID = 0x0101000f; // android:debuggable
     // console.log(`Resource map before: size=${this.get_size()}`);
     // console.log(`Adding resource entry at index=${stringIndex}, resourceId=0x${DEBUGGABLE_RESOURCE_ID.toString(16)}`);
 
@@ -288,7 +288,6 @@ class StartElementChunk {
   }
 
   private parseNamespace(): void {
-    // Frida's logic:
     // 1. Get the attributes section (everything after the 36-byte header)
     // 2. Get the last 20 bytes (the last attribute, if it exists)
     // 3. Extract the namespace field (first uint32) from that attribute
@@ -319,13 +318,10 @@ class StartElementChunk {
     if (this.namespace === -1) {
       throw new Error('Cannot insert debuggable: no existing attributes to extract namespace from');
     }
-    // const DEBUGGABLE_RESOURCE_ID = 0x010100d9; // android:debuggable
-    const DEBUGGABLE_RESOURCE_ID = 0x101000F; // android:debuggable
+    const DEBUGGABLE_RESOURCE_ID = 0x0101000f; // android:debuggable
     const HEADER_SIZE = 0x24;
     const ATTRIBUTE_SIZE = 20;
-    // const ANDROID_NAMESPACE_INDEX = 0;
     const oldChunkSize = this.view.getUint32(4, true);
-    const attributeStart = this.view.getUint16(24, true);
     const attributeCount = this.view.getUint16(28, true);
 
     // Create new attribute (20 bytes)
@@ -348,7 +344,7 @@ class StartElementChunk {
     // let insertPos = attributeStart;
     let insertPos = HEADER_SIZE;
     for (let i = 0; i < attributeCount; i++) {
-      const attrOffset = attributeStart + i * ATTRIBUTE_SIZE
+      const attrOffset = HEADER_SIZE + i * ATTRIBUTE_SIZE
 
       // Read the name string from this attribute
       const nameStringIndex = this.view.getUint32(attrOffset + 4, true);

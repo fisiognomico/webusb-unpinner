@@ -46,7 +46,6 @@ async function signPackageCert(
 ): Promise<string> {
   var b64outZip: string = "";
   const packageSigner = new ApkSignerV2(cert.password, cert.alias);
-  // TODO store by default an hardcoded keystore
   let base64Der: string;
   if (generateKey) {
     base64Der = await packageSigner.generateKey({

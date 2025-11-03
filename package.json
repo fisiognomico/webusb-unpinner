@@ -8,7 +8,7 @@
     "@yume-chan/adb-daemon-webusb": "^2.1.0",
     "@yume-chan/adb-scrcpy": "^2.1.1",
     "@yume-chan/android-bin": "^2.1.0",
-    "android-package-signer": "^0.2.0",
+    "android-package-signer": "^0.2.1",
     "binary-xml": "npm:binary-xml-js@^0.0.2",
     "buffer": "^6.0.3",
     "file-saver": "^2.0.5",

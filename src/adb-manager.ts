@@ -349,7 +349,6 @@ export class AdbManager {
     try {
 
       // This might seem naive, but apkData is already in memory
-      // TODO maybe switch to yume adb PM interface?
       const stream = new ReadableStream<Uint8Array>({
           start(controller) {
               controller.enqueue(apkData);
