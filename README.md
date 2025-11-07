@@ -82,7 +82,6 @@ serve dist
 
 ### Step 2: Configure Proxy
 
-If you want to intercept HTTPS traffic:
 1. Enter proxy address and port
 2. Paste your CA certificate (PEM format)
 3. Click **Save Proxy Configuration**
@@ -97,11 +96,13 @@ If you want to intercept HTTPS traffic:
    - Sign the patched APK
    - Install on your device
 
+Alternatively, use the drop down menu to monitor an app that is already
+installed on your device!
+
 ### Step 4: Monitor & Intercept
 
-Once patched, use tools like Frida or HTTP Toolkit to:
+Once patched, use tools like mitmproxy or HTTP Toolkit to:
 - Intercept HTTPS traffic
-- Disable certificate pinning
 - Monitor app behavior
 - Modify app logic at runtime
 
@@ -126,6 +127,11 @@ Android Device
 │  5. JDWP Frida Injection            │
 └─────────────────────────────────────┘
 ```
+
+For a better overview of the internals of the project, please check out the
+project documentation:
+   - [JDWP Instrumentation](docs/jdwp-instrumentation.md)
+   - [APK patching](docs/apk-patch.md)
 
 ### Key Components
 
