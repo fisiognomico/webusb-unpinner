@@ -1,0 +1,30 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  webusb-unpinner:
+    build: .
+    container_name: webusb-unpinner
+    privileged: true  # Required for USB device access
+    ports:
+      - "8080:8080"   # mitmproxy
+      - "8081:8081"   # mitmweb (optional)
+      - "9000:9000"   # WebUSB app
+    environment:
+      - PROXY_PORT=8080
+      - WEBUSB_PORT=9000
+      - AUTO_CONFIGURE=true
+      - PROXY_HOST=0.0.0.0  # Listen on all interfaces
+    volumes:
+      - ./certs:/root/.mitmproxy  # Persist certificates
+    networks:
+      webusb_net:
+        ipv4_address: 172.20.0.10
+
+networks:
+  webusb_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1

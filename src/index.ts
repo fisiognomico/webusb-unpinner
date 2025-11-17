@@ -6,7 +6,7 @@ import { signApk } from "./signer";
 import { AdbManager } from "./adb-manager";
 import { initFridaGadget } from "./jdwp";
 import { enableDebuggableFlag, getPackageName } from "./apk-patcher";
-import { config, generateFridaConfigJs } from "./config";
+import { config, generateFridaConfigJs, loadAutoConfiguration } from "./config";
 
 const statusDiv = document.getElementById('status')!;
 const connectBtn = document.getElementById('connectBtn') as HTMLButtonElement;
@@ -239,7 +239,7 @@ async function installAndInstrumentApp(
     await adbManager.installApk(signedApks[0], remotePath);
   } else {
     // Multiple APKs - convert to Files and install as split
-    const apkFiles: File[] = signedApks.map((data, idx) => 
+    const apkFiles: File[] = signedApks.map((data, idx) =>
       new File([data as BlobPart], `${packageName}_${idx}.apk`, { type: 'application/vnd.android.package-archive' })
     );
     await adbManager.installSplitApk(apkFiles);
@@ -558,6 +558,30 @@ async function backupApk(adbManager: AdbManager, packageName: string): Promise<A
  * PROXY CONFIGURATION
  *********************
  */
+
+
+// Add to initialization (after initializeObserver())
+async function initializeAutoConfig() {
+  const autoConfig = await loadAutoConfiguration();
+
+  if (autoConfig) {
+    // Populate UI fields
+    proxyAddressInput.value = autoConfig.address || '';
+    proxyPortInput.value = autoConfig.port?.toString() || '';
+    caCertificateInput.value = autoConfig.caCertificate || '';
+
+    // Show status
+    proxyStatus.textContent = 'Auto-configuration loaded';
+    proxyStatus.className = 'status-text success';
+
+    // Auto-save if device is connected
+    const state = getDeviceState();
+    if (state.client) {
+      saveProxyBtn.click();
+    }
+  }
+}
+
 saveProxyBtn.addEventListener('click', async () => {
   const address = proxyAddressInput.value.trim() || null;
   const portStr = proxyPortInput.value.trim();
@@ -659,5 +683,7 @@ window.addEventListener('beforeunload', async () => {
 initializeCredentials();
 // Initialize device observer
 initializeObserver();
+// Check if a configuration is already present (usually Docker)
+initializeAutoConfig();
 // Periodically update UI to reflect state changes
 setInterval(updateStatus, 10000);
