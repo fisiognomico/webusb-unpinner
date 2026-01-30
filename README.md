@@ -198,10 +198,10 @@ DEVICE_PATH=/data/local/tmp/
 NODE_ENV=development
 ```
 
-** SERVER_URI ** address where the application is reachable
-** DEVICE_PATH ** local writable folder on Android where scripts will be
-dropped.
-** NODE_ENV ** development or production environment are supported
+* **SERVER_URI** : prefix for static resources URLs
+* **DEVICE_PATH** : local writable folder on Android where scripts will be
+  dropped.
+* **NODE_ENV** : development or production environment are supported
 
 ### Customizing the Certificate
 
