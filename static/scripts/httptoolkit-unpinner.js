@@ -1,8 +1,143 @@
+// ============== NATIVE LOGCAT LOGGING ==============
+const LOG_INFO = 4;
+const LOG_WARN = 5;
+const LOG_ERROR = 6;
+
+let _log_write = null;
+let _log_tag = null;
+
+try {
+    _log_write = new NativeFunction(
+        Module.getExportByName(null, '__android_log_write'),
+        'int', ['int', 'pointer', 'pointer']
+    );
+    _log_tag = Memory.allocUtf8String("UNPIN");
+} catch (e) {
+    // Fallback - won't reach logcat but at least won't crash
+}
+
+function log(msg) {
+    if (_log_write && _log_tag) {
+        const msgPtr = Memory.allocUtf8String(msg);
+        _log_write(LOG_INFO, _log_tag, msgPtr);
+    }
+}
+
+function logWarn(msg) {
+    if (_log_write && _log_tag) {
+        const msgPtr = Memory.allocUtf8String(msg);
+        _log_write(LOG_WARN, _log_tag, msgPtr);
+    }
+}
+
+function logErr(msg) {
+    if (_log_write && _log_tag) {
+        const msgPtr = Memory.allocUtf8String(msg);
+        _log_write(LOG_ERROR, _log_tag, msgPtr);
+    }
+}
+
+// Modified from https://github.com/httptoolkit/frida-interception-and-unpinning/blob/48fd909ed5e016b771cf4d645ce30cbab217e234
+// Modified to be compatible with mimtproxy and other SSL proxies that do
+// not append their CA to each server response.
+
 // If you like, set to to true to enable extra logging:
 const DEBUG_MODE = false;
 const IGNORED_NON_HTTP_PORTS = [];
 const BLOCK_HTTP3 = true;
 const PROXY_SUPPORTS_SOCKS5 = false;
+
+// Right now this API is a bit funky - the callback will be called with a Frida Module instance
+// if the module is properly detected, but may be called with just { name, path, base, size }
+// in some cases (e.g. shared libraries loaded from inside an APK on Android). Works OK right now,
+// as it's not widely used but needs improvement in future if we extend this.
+function waitForModule(moduleName, callback) {
+    if (Array.isArray(moduleName)) {
+        moduleName.forEach(module => waitForModule(module, callback));
+    }
+
+    try {
+        const module = Process.getModuleByName(moduleName)
+        module.ensureInitialized();
+        callback(module);
+        return;
+    } catch (e) {
+        try {
+            const module = Module.load(moduleName);
+            callback(module);
+            return;
+        } catch (e) {}
+    }
+
+    MODULE_LOAD_CALLBACKS[moduleName] = callback;
+}
+
+const getModuleName = (nameOrPath) => {
+    const endOfPath = nameOrPath.lastIndexOf('/');
+    return nameOrPath.slice(endOfPath + 1);
+};
+
+const MODULE_LOAD_CALLBACKS = {};
+new ApiResolver('module').enumerateMatches('exports:linker*!*dlopen*').forEach((dlopen) => {
+    Interceptor.attach(dlopen.address, {
+        onEnter(args) {
+            const moduleArg = args[0].readCString();
+            if (moduleArg) {
+                this.path = moduleArg;
+                this.moduleName = getModuleName(moduleArg);
+            }
+        },
+        onLeave(retval) {
+            if (!this.path || !retval || retval.isNull()) return;
+            if (!MODULE_LOAD_CALLBACKS[this.moduleName]) return;
+
+            let module = Process.findModuleByName(this.moduleName)
+                ?? Process.findModuleByAddress(retval);
+            if (!module) {
+                // Some modules are loaded in ways that mean Frida can't detect them, and
+                // can't look them up by name (notably when loading libraries from inside an
+                // APK on Android). To handle this, we can use dlsym to look up an example
+                // symbol and find the underlying module details directly, where possible.
+                module = getAnonymousModule(this.moduleName, this.path, retval);
+                if (!module) return;
+            }
+
+            Object.keys(MODULE_LOAD_CALLBACKS).forEach((key) => {
+                if (this.moduleName === key) {
+                    if (module) {
+                        MODULE_LOAD_CALLBACKS[key](module);
+                        delete MODULE_LOAD_CALLBACKS[key];
+                    }
+                }
+            });
+        }
+    });
+});
+
+const getAnonymousModule = (name, path, handle) => {
+    const dlsymAddr = Module.findGlobalExportByName('dlsym');
+    if (!dlsymAddr) {
+        logErr(`[!] Cannot find dlsym, cannot get anonymous module info for ${name}`);
+        return;
+    }
+
+    const dlsym = new NativeFunction(dlsymAddr, 'pointer', ['pointer', 'pointer']);
+
+    // Handle here is the return value from dlopen - but in this scenario, it's just an
+    // opaque handle into to 'soinfo' data that other methods can use to get the
+    // real pointer to parts of the module, like so:
+    const onLoadPointer = dlsym(handle, Memory.allocUtf8String('JNI_OnLoad'));
+
+    // Once we have an actual pointer, we can get the range that holds it:
+    const range = Process.getRangeByAddress(onLoadPointer);
+
+    return {
+        base: range.base,
+        size: range.size,
+        name,
+        path,
+    }
+};
 
 (() => {
     const PROXY_HOST_IPv4_BYTES = PROXY_HOST.split('.').map(part => parseInt(part, 10));
@@ -30,8 +165,8 @@ const PROXY_SUPPORTS_SOCKS5 = false;
 
         conn = systemModule.getExportByName('connect')
     } catch (e) {
-        console.error("Failed to set up native hooks:", e.message);
-        console.warn('Could not initialize system functions to to hook raw traffic');
+        logErr("Failed to set up native hooks:", e.message);
+        logWarn('Could not initialize system functions to to hook raw traffic');
         return;
     }
 
@@ -102,7 +237,7 @@ const PROXY_SUPPORTS_SOCKS5 = false;
                         }
                     }
 
-                    console.log(`Manually intercepting ${sockType} connection to ${getReadableAddress(hostBytes, isIPv6)}:${port}`);
+                    log(`Manually intercepting ${sockType} connection to ${getReadableAddress(hostBytes, isIPv6)}:${port}`);
 
                     // Overwrite the port with the proxy port:
                     portAddrBytes.setUint16(0, PROXY_PORT, false); // Big endian
@@ -125,7 +260,7 @@ const PROXY_SUPPORTS_SOCKS5 = false;
                 }
             } else {
                 // Should just be unix domain sockets - UDP & TCP are covered above
-                if (DEBUG_MODE) console.log(`Ignoring ${sockType} connection`);
+                if (DEBUG_MODE) log(`Ignoring ${sockType} connection`);
                 this.state = 'ignored';
             }
         },
@@ -141,7 +276,7 @@ const PROXY_SUPPORTS_SOCKS5 = false;
                 if (connectSuccess) {
                     handshakeSuccess = performSocksHandshake(this.sockFd, host, port, isIPv6);
                 } else {
-                    console.error(`SOCKS: Failed to connect to proxy at ${PROXY_HOST}:${PROXY_PORT}`);
+                    logErr(`SOCKS: Failed to connect to proxy at ${PROXY_HOST}:${PROXY_PORT}`);
                 }
 
                 if (this.isNonBlocking) {
@@ -153,7 +288,7 @@ const PROXY_SUPPORTS_SOCKS5 = false;
                     if (DEBUG_MODE) console.debug(`SOCKS redirect successful for fd ${this.sockFd} to ${readableHost}:${port}`);
                     retval.replace(0);
                 } else {
-                    if (DEBUG_MODE) console.error(`SOCKS redirect FAILED for fd ${this.sockFd}`);
+                    if (DEBUG_MODE) logErr(`SOCKS redirect FAILED for fd ${this.sockFd}`);
                     retval.replace(-1);
                 }
             } else if (DEBUG_MODE) {
@@ -167,7 +302,7 @@ const PROXY_SUPPORTS_SOCKS5 = false;
         }
     });
 
-    console.log(`== Redirecting ${
+    log(`== Redirecting ${
         IGNORED_NON_HTTP_PORTS.length === 0
         ? 'all'
         : 'all unrecognized'
@@ -204,18 +339,18 @@ const PROXY_SUPPORTS_SOCKS5 = false;
     function performSocksHandshake(sockfd, targetHostBytes, targetPort, isIPv6) {
         const hello = Memory.alloc(3).writeByteArray([0x05, 0x01, 0x00]);
         if (send(sockfd, hello, 3, 0) < 0) {
-            console.error("SOCKS: Failed to send hello");
+            logErr("SOCKS: Failed to send hello");
             return false;
         }
 
         const response = Memory.alloc(2);
         if (recv(sockfd, response, 2, 0) < 0) {
-            console.error("SOCKS: Failed to receive server choice");
+            logErr("SOCKS: Failed to receive server choice");
             return false;
         }
 
         if (response.readU8() !== 0x05 || response.add(1).readU8() !== 0x00) {
-            console.error("SOCKS: Server rejected auth method");
+            logErr("SOCKS: Server rejected auth method");
             return false;
         }
 
@@ -231,19 +366,19 @@ const PROXY_SUPPORTS_SOCKS5 = false;
         const reqBuf = Memory.alloc(req.length).writeByteArray(req);
 
         if (send(sockfd, reqBuf, req.length, 0) < 0) {
-            console.error("SOCKS: Failed to send connection request");
+            logErr("SOCKS: Failed to send connection request");
             return false;
         }
 
         const replyHeader = Memory.alloc(4);
         if (recv(sockfd, replyHeader, 4, 0) < 0) {
-            console.error("SOCKS: Failed to receive reply header");
+            logErr("SOCKS: Failed to receive reply header");
             return false;
         }
 
         const replyCode = replyHeader.add(1).readU8();
         if (replyCode !== 0x00) {
-            console.error(`SOCKS: Server returned error code ${replyCode}`);
+            logErr(`SOCKS: Server returned error code ${replyCode}`);
             return false;
         }
 
@@ -279,46 +414,13 @@ TARGET_LIBS.forEach((targetLib) => {
     ) {
         // On iOS, we expect this to always work immediately, so print a warning if we
         // ever have to skip this TLS patching process.
-        console.log(`\n !!! --- Could not load ${targetLib.name} to hook TLS --- !!!`);
+        log(`\n !!! --- Could not load ${targetLib.name} to hook TLS --- !!!`);
     }
 });
 
-// Native TLS hook
+// Native TLS hook - MODIFIED: Always accept certificates without verification
 function patchTargetLib(targetModule, targetName) {
-    // Get the peer certificates from an SSL pointer. Returns a pointer to a STACK_OF(CRYPTO_BUFFER)
-    // which requires use of the next few methods below to actually access.
-    // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_get0_peer_certificates
-    const SSL_get0_peer_certificates = new NativeFunction(
-        targetModule.getExportByName('SSL_get0_peer_certificates'),
-        'pointer', ['pointer']
-    );
-
-    // Stack methods:
-    // https://commondatastorage.googleapis.com/chromium-boringssl-docs/stack.h.html
-    const sk_num = new NativeFunction(
-        targetModule.getExportByName('sk_num'),
-        'size_t', ['pointer']
-    );
-
-    const sk_value = new NativeFunction(
-        targetModule.getExportByName('sk_value'),
-        'pointer', ['pointer', 'int']
-    );
-
-    // Crypto buffer methods:
-    // https://commondatastorage.googleapis.com/chromium-boringssl-docs/pool.h.html
-    const crypto_buffer_len = new NativeFunction(
-        targetModule.getExportByName('CRYPTO_BUFFER_len'),
-        'size_t', ['pointer']
-    );
-
-    const crypto_buffer_data = new NativeFunction(
-        targetModule.getExportByName('CRYPTO_BUFFER_data'),
-        'pointer', ['pointer']
-    );
-
     const SSL_VERIFY_OK = 0x0;
-    const SSL_VERIFY_INVALID = 0x1;
 
     // We cache the verification callbacks we create. In general (in testing, 100% of the time) the
     // 'real' callback is always the exact same address, so this is much more efficient than creating
@@ -327,69 +429,12 @@ function patchTargetLib(targetModule, targetName) {
 
     const buildVerificationCallback = (realCallbackAddr) => {
         if (!verificationCallbackCache[realCallbackAddr]) {
-            const realCallback = (!realCallbackAddr || realCallbackAddr.isNull())
-                ? new NativeFunction(realCallbackAddr, 'int', ['pointer','pointer'])
-                : () => SSL_VERIFY_INVALID; // Callback can be null - treat as invalid (=our validation only)
-
-            let pendingCheckThreads = new Set();
-
+            // MODIFIED: Always return SSL_VERIFY_OK - no certificate verification
             const hookedCallback = new NativeCallback(function (ssl, out_alert) {
-                let realResult = false; // False = not yet called, 0/1 = call result
-
-                const threadId = Process.getCurrentThreadId();
-                const alreadyHaveLock = pendingCheckThreads.has(threadId);
-
-                // We try to have only one thread running these checks at a time, as parallel calls
-                // here on the same underlying callback seem to crash in some specific scenarios
-                while (pendingCheckThreads.size > 0 && !alreadyHaveLock) {
-                    Thread.sleep(0.01);
+                if (DEBUG_MODE) {
+                    log('[Native TLS] Bypassing certificate verification');
                 }
-                pendingCheckThreads.add(threadId);
-
-                if (targetName !== 'libboringssl.dylib') {
-                    // Cronet assumes its callback is always called, and crashes if not. iOS's BoringSSL
-                    // meanwhile seems to use some negative checks in its callback, and rejects the
-                    // connection independently of the return value here if it's called with a bad cert.
-                    // End result: we *only sometimes* proactively call the callback.
-                    realResult = realCallback(ssl, out_alert);
-                }
-
-                // Extremely dumb certificate validation: we accept any chain where the *exact* CA cert
-                // we were given is present. No flexibility for non-trivial cert chains, and no
-                // validation beyond presence of the expected CA certificate. BoringSSL does do a
-                // fair amount of essential validation independent of the certificate comparison
-                // though, so some basics may be covered regardless (see tls13_process_certificate_verify).
-
-                // This *intentionally* does not reject certs with the wrong hostname, expired CA
-                // or leaf certs, and lots of other issues. This is significantly better than nothing,
-                // but it is not production-ready TLS verification for general use in untrusted envs!
-
-                const peerCerts = SSL_get0_peer_certificates(ssl);
-
-                // Loop through every cert in the chain:
-                for (let i = 0; i < sk_num(peerCerts); i++) {
-                    // For each cert, check if it *exactly* matches our configured CA cert:
-                    const cert = sk_value(peerCerts, i);
-                    const certDataLength = crypto_buffer_len(cert).toNumber();
-
-                    if (certDataLength !== CERT_DER.byteLength) continue;
-
-                    const certPointer = crypto_buffer_data(cert);
-                    const certData = new Uint8Array(certPointer.readByteArray(certDataLength));
-
-                    if (certData.every((byte, j) => CERT_DER[j] === byte)) {
-                        if (!alreadyHaveLock) pendingCheckThreads.delete(threadId);
-                        return SSL_VERIFY_OK;
-                    }
-                }
-
-                // No matched peer - fallback to the provided callback instead:
-                if (realResult === false) { // Haven't called it yet
-                    realResult = realCallback(ssl, out_alert);
-                }
-
-                if (!alreadyHaveLock) pendingCheckThreads.delete(threadId);
-                return realResult;
+                return SSL_VERIFY_OK;
             }, 'int', ['pointer','pointer']);
 
             verificationCallbackCache[realCallbackAddr] = hookedCallback;
@@ -418,11 +463,11 @@ function patchTargetLib(targetModule, targetName) {
 
     if (customVerifyAddrs.length) {
         if (DEBUG_MODE) {
-            console.log(`[+] Patched ${customVerifyAddrs.length} ${targetName} verification methods`);
+            log(`[+] Patched ${customVerifyAddrs.length} ${targetName} verification methods`);
         }
-        console.log(`== Hooked native TLS lib ${targetName} ==`);
+        log(`== Hooked native TLS lib ${targetName} ==`);
     } else {
-        console.log(`\n !!! Hooking native TLS lib ${targetName} failed - no verification methods found`);
+        log(`\n !!! Hooking native TLS lib ${targetName} failed - no verification methods found`);
     }
 
     const get_psk_identity_addr = targetModule.findExportByName("SSL_get_psk_identity");
@@ -433,7 +478,7 @@ function patchTargetLib(targetModule, targetName) {
             return "PSK_IDENTITY_PLACEHOLDER";
         }, 'pointer', ['pointer']));
     } else if (customVerifyAddrs.length) {
-        console.log(`Patched ${customVerifyAddrs.length} custom_verify methods, but couldn't find get_psk_identity`);
+        log(`Patched ${customVerifyAddrs.length} custom_verify methods, but couldn't find get_psk_identity`);
     }
 }
 
@@ -461,14 +506,14 @@ Java.perform(() => {
     ];
     Java.use('java.lang.System').clearProperty.implementation = function (property) {
         if (controlledSystemProperties.includes(property)) {
-            if (DEBUG_MODE) console.log(`Ignoring attempt to clear ${property} system property`);
+            if (DEBUG_MODE) log(`Ignoring attempt to clear ${property} system property`);
             return this.getProperty(property);
         }
         return this.clearProperty(...arguments);
     }
     Java.use('java.lang.System').setProperty.implementation = function (property) {
         if (controlledSystemProperties.includes(property)) {
-            if (DEBUG_MODE) console.log(`Ignoring attempt to override ${property} system property`);
+            if (DEBUG_MODE) log(`Ignoring attempt to override ${property} system property`);
             return this.getProperty(property);
         }
         return this.setProperty(...arguments);
@@ -480,7 +525,7 @@ Java.perform(() => {
     ConnectivityManager.getDefaultProxy.implementation = () => ProxyInfo.$new(PROXY_HOST, PROXY_PORT, '');
     // (Not clear if this works 100% - implying there are ConnectivityManager subclasses handling this)
 
-    console.log(`== Proxy system configuration overridden to ${PROXY_HOST}:${PROXY_PORT} ==`);
+    log(`== Proxy system configuration overridden to ${PROXY_HOST}:${PROXY_PORT} ==`);
 
     // Configure the proxy indirectly, by overriding the return value for all ProxySelectors everywhere:
     const Collections = Java.use('java.util.Collections');
@@ -507,84 +552,23 @@ Java.perform(() => {
     // Replace the 'select' of every implementation, so they all send traffic to us:
     proxySelectorClasses.forEach(ProxySelectorCls => {
         if (DEBUG_MODE) {
-            console.log('Rewriting', ProxySelectorCls.toString());
+            log('Rewriting', ProxySelectorCls.toString());
         }
         ProxySelectorCls.select.implementation = () => getTargetProxyList()
     });
 
-    console.log(`== Proxy configuration overridden to ${PROXY_HOST}:${PROXY_PORT} ==`);
+    log(`== Proxy configuration overridden to ${PROXY_HOST}:${PROXY_PORT} ==`);
 });
 
-// Android Certificate injection
-Java.perform(() => {
-    // First, we build a JVM representation of our certificate:
-    const String = Java.use("java.lang.String");
-    const ByteArrayInputStream = Java.use('java.io.ByteArrayInputStream');
-    const CertFactory = Java.use('java.security.cert.CertificateFactory');
+// ============================================================================
+// Android Certificate injection - TRUST ALL APPROACH
+// Injects the proxy CA certificate AND accepts all certificates
+// This is needed for:
+// 1. WebView compatibility (needs the CA in TrustedCertificateIndex)
+// 2. mitmproxy compatibility (doesn't inject CA into response chain)
+// ============================================================================
 
-    let cert;
-    try {
-        const certFactory = CertFactory.getInstance("X.509");
-        const certBytes = String.$new(CERT_PEM).getBytes();
-        cert = certFactory.generateCertificate(ByteArrayInputStream.$new(certBytes));
-    } catch (e) {
-        console.error('Could not parse provided certificate PEM!');
-        console.error(e);
-        Java.use('java.lang.System').exit(1);
-    }
-
-    // Then we hook TrustedCertificateIndex. This is used for caching known trusted certs within Conscrypt -
-    // by prepopulating all instances, we ensure that all TrustManagerImpls (and potentially other
-    // things) automatically trust our certificate specifically (without disabling validation entirely).
-    // This should apply to Android v7+ - previous versions used SSLContext & X509TrustManager.
-    [
-        'com.android.org.conscrypt.TrustedCertificateIndex',
-        'org.conscrypt.TrustedCertificateIndex', // Might be used (com.android is synthetic) - unclear
-        'org.apache.harmony.xnet.provider.jsse.TrustedCertificateIndex' // Used in Apache Harmony version of Conscrypt
-    ].forEach((TrustedCertificateIndexClassname, i) => {
-        let TrustedCertificateIndex;
-        try {
-            TrustedCertificateIndex = Java.use(TrustedCertificateIndexClassname);
-        } catch (e) {
-            if (i === 0) {
-                throw new Error(`${TrustedCertificateIndexClassname} not found - could not inject system certificate`);
-            } else {
-                // Other classnames are optional fallbacks
-                if (DEBUG_MODE) {
-                    console.log(`[ ] Skipped cert injection for ${TrustedCertificateIndexClassname} (not present)`);
-                }
-                return;
-            }
-        }
-
-        TrustedCertificateIndex.$init.overloads.forEach((overload) => {
-            overload.implementation = function () {
-                this.$init(...arguments);
-                // Index our cert as already trusted, right from the start:
-                this.index(cert);
-            }
-        });
-
-        TrustedCertificateIndex.reset.overloads.forEach((overload) => {
-            overload.implementation = function () {
-                const result = this.reset(...arguments);
-                // Index our cert in here again, since the reset removes it:
-                this.index(cert);
-                return result;
-            };
-        });
-
-        if (DEBUG_MODE) console.log(`[+] Injected cert into ${TrustedCertificateIndexClassname}`);
-    });
-
-    // This effectively adds us to the system certs, and also defeats quite a bit of basic certificate
-    // pinning too! It auto-trusts us in any implementation that uses TrustManagerImpl (Conscrypt) as
-    // the underlying cert checking component.
-
-    console.log('== System certificate trust injected ==');
-});
-
-// Bypass SSL pinning
+// Helper function to build X509Certificate from PEM bytes
 function buildX509CertificateFromBytes(certBytes) {
     const ByteArrayInputStream = Java.use('java.io.ByteArrayInputStream');
     const CertFactory = Java.use('java.security.cert.CertificateFactory');
@@ -592,51 +576,143 @@ function buildX509CertificateFromBytes(certBytes) {
     return certFactory.generateCertificate(ByteArrayInputStream.$new(certBytes));
 }
 
-function getCustomTrustManagerFactory() {
-    // This is the one X509Certificate that we want to trust. No need to trust others (we should capture
-    // _all_ TLS traffic) and risky to trust _everything_ (risks interception between device & proxy, or
-    // worse: some traffic being unintercepted & sent as HTTPS with TLS effectively disabled over the
-    // real web - potentially exposing auth keys, private data and all sorts).
-    const certBytes = Java.use("java.lang.String").$new(CERT_PEM).getBytes();
-    const trustedCACert = buildX509CertificateFromBytes(certBytes);
+Java.perform(() => {
+    // Build our trusted CA certificate from CERT_PEM
+    let trustedCACert = null;
+    try {
+        if (typeof CERT_PEM !== 'undefined' && CERT_PEM && CERT_PEM.trim().length > 0) {
+            const certBytes = Java.use("java.lang.String").$new(CERT_PEM).getBytes();
+            trustedCACert = buildX509CertificateFromBytes(certBytes);
+            log('[+] Built X509Certificate from CERT_PEM');
+        } else {
+            logWarn('[ ] CERT_PEM not defined or empty - certificate injection disabled');
+        }
+    } catch (e) {
+        logWarn(`[ ] Failed to build X509Certificate from CERT_PEM: ${e}`);
+    }
 
-    // Build a custom TrustManagerFactory with a KeyStore that trusts only this certificate:
+    // Hook TrustedCertificateIndex classes
+    [
+        'com.android.org.conscrypt.TrustedCertificateIndex',
+        'org.conscrypt.TrustedCertificateIndex',
+        'org.apache.harmony.xnet.provider.jsse.TrustedCertificateIndex'
+    ].forEach((TrustedCertificateIndexClassname, i) => {
+        let TrustedCertificateIndex;
+        try {
+            TrustedCertificateIndex = Java.use(TrustedCertificateIndexClassname);
+        } catch (e) {
+            if (i === 0) {
+                // First one is required on modern Android
+                logWarn(`${TrustedCertificateIndexClassname} not found - certificate injection may not work`);
+            }
+            return;
+        }
 
-    const KeyStore = Java.use("java.security.KeyStore");
-    const keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
-    keyStore.load(null);
-    keyStore.setCertificateEntry("ca", trustedCACert);
+        // Method 1: Inject our CA certificate into the index
+        // This is needed for WebView to find our CA when validating
+        if (trustedCACert) {
+            try {
+                // Hook the 'index' method to also add our certificate
+                const indexMethod = TrustedCertificateIndex.index;
+                if (indexMethod) {
+                    indexMethod.implementation = function (cert) {
+                        // Call original to add the provided cert
+                        this.index(cert);
+                        // Also inject our trusted CA
+                        try {
+                            this.index(trustedCACert);
+                        } catch (e) {
+                            // May already be indexed, ignore
+                        }
+                    };
+                }
+            } catch (e) {
+                if (DEBUG_MODE) log(`Could not hook index method: ${e}`);
+            }
+        }
 
-    const TrustManagerFactory = Java.use("javax.net.ssl.TrustManagerFactory");
-    const customTrustManagerFactory = TrustManagerFactory.getInstance(
-        TrustManagerFactory.getDefaultAlgorithm()
-    );
-    customTrustManagerFactory.init(keyStore);
+        // Method 2: Hook findBySubjectAndPublicKey - TRUST ALL
+        try {
+            TrustedCertificateIndex.findBySubjectAndPublicKey.implementation = function (cert) {
+                // Always return the cert itself as trusted
+                if (DEBUG_MODE) log('[TrustedCertificateIndex] Trust-all: accepting cert');
+                return cert;
+            };
+        } catch (e) {
+            if (DEBUG_MODE) log(`Could not hook findBySubjectAndPublicKey: ${e}`);
+        }
 
-    return customTrustManagerFactory;
-}
+        // Method 3: Hook findByIssuerAndSignature - TRUST ALL
+        try {
+            TrustedCertificateIndex.findByIssuerAndSignature.implementation = function (cert) {
+                // Always return the cert itself as trusted
+                if (DEBUG_MODE) log('[TrustedCertificateIndex] Trust-all: accepting cert for issuer check');
+                return cert;
+            };
+        } catch (e) {
+            if (DEBUG_MODE) log(`Could not hook findByIssuerAndSignature: ${e}`);
+        }
 
-function getCustomX509TrustManager() {
-    const customTrustManagerFactory = getCustomTrustManagerFactory();
-    const trustManagers = customTrustManagerFactory.getTrustManagers();
+        // Method 4: Hook findAllByIssuerAndSignature for WebView which may use this
+        try {
+            const findAllMethod = TrustedCertificateIndex.findAllByIssuerAndSignature;
+            if (findAllMethod) {
+                findAllMethod.implementation = function (cert) {
+                    const Set = Java.use('java.util.HashSet');
+                    const resultSet = Set.$new();
+                    
+                    // Add our trusted CA if we have one
+                    if (trustedCACert) {
+                        try {
+                            resultSet.add(trustedCACert);
+                        } catch (e) {}
+                    }
+                    
+                    // Also add the cert itself (trust-all)
+                    try {
+                        resultSet.add(cert);
+                    } catch (e) {}
+                    
+                    if (DEBUG_MODE) log('[TrustedCertificateIndex] findAllByIssuerAndSignature returning set');
+                    return resultSet;
+                };
+            }
+        } catch (e) {
+            if (DEBUG_MODE) log(`Could not hook findAllByIssuerAndSignature: ${e}`);
+        }
 
-    const X509TrustManager = Java.use('javax.net.ssl.X509TrustManager');
-
-    const x509TrustManager = trustManagers.find((trustManager) => {
-        return trustManager.class.isAssignableFrom(X509TrustManager.class);
+        if (trustedCACert) {
+            log(`[+] Injected cert into ${TrustedCertificateIndexClassname}`);
+        } else {
+            log(`[+] Patched ${TrustedCertificateIndexClassname} (trust-all mode)`);
+        }
     });
 
-    // We have to cast it explicitly before Frida will allow us to use the X509 methods:
-    return Java.cast(x509TrustManager, X509TrustManager);
-}
+    log('== System certificate trust modified (CA injected + trust-all) ==');
+});
 
+// Bypass SSL pinning - MODIFIED: Accept all certificates
 // Some standard hook replacements for various cases:
 const NO_OP = () => {};
 const RETURN_TRUE = () => true;
-const CHECK_OUR_TRUST_MANAGER_ONLY = () => {
-    const trustManager = getCustomX509TrustManager();
-    return (certs, authType) => {
-        trustManager.checkServerTrusted(certs, authType);
+
+// MODIFIED: Accept all certificates without verification
+const TRUST_ALL_CERTS = () => {
+    return (_certs, _authType) => {
+        // Do nothing - accept all certificates
+        if (DEBUG_MODE) {
+            log('[TrustManager] Accepting all certificates');
+        }
+    };
+};
+
+// MODIFIED: Return empty list for extended trust manager (accepts all)
+const TRUST_ALL_CERTS_EXTENDED = () => {
+    return (certs, _authType, _hostname) => {
+        if (DEBUG_MODE) {
+            log('[TrustManager Extended] Accepting all certificates');
+        }
+        return Java.use('java.util.Arrays').asList(certs);
     };
 };
 
@@ -658,22 +734,29 @@ const PINNING_FIXES = {
         },
     ],
 
-    // --- Native SSLContext
+    // --- Native SSLContext - MODIFIED: Use trust-all trust manager
 
     'javax.net.ssl.SSLContext': [
         {
             methodName: 'init',
             overload: ['[Ljavax.net.ssl.KeyManager;', '[Ljavax.net.ssl.TrustManager;', 'java.security.SecureRandom'],
             replacement: (targetMethod) => {
-                const customTrustManagerFactory = getCustomTrustManagerFactory();
+                // Create a TrustManager that trusts all certificates
+                const TrustAllManager = Java.registerClass({
+                    name: 'com.frida.TrustAllManager',
+                    implements: [Java.use('javax.net.ssl.X509TrustManager')],
+                    methods: {
+                        checkClientTrusted: function(chain, authType) {},
+                        checkServerTrusted: function(chain, authType) {},
+                        getAcceptedIssuers: function() {
+                            return [];
+                        }
+                    }
+                });
 
-                // When constructor is called, replace the trust managers argument:
                 return function (keyManager, _providedTrustManagers, secureRandom) {
-                    return targetMethod.call(this,
-                        keyManager,
-                        customTrustManagerFactory.getTrustManagers(), // Override their trust managers
-                        secureRandom
-                    );
+                    const trustAllArray = Java.array('javax.net.ssl.TrustManager', [TrustAllManager.$new()]);
+                    return targetMethod.call(this, keyManager, trustAllArray, secureRandom);
                 }
             }
         }
@@ -710,7 +793,7 @@ const PINNING_FIXES = {
         }
     ],
 
-    // --- Native HostnameVerification override (n.b. Android contains its own vendored OkHttp v2!)
+    // --- Native HostnameVerification override - MODIFIED: Always return true
 
     'com.android.okhttp.internal.tls.OkHostnameVerifier': [
         {
@@ -719,30 +802,7 @@ const PINNING_FIXES = {
                 'java.lang.String',
                 'javax.net.ssl.SSLSession'
             ],
-            replacement: (targetMethod) => {
-                // Our trust manager - this trusts *only* our extra CA
-                const trustManager = getCustomX509TrustManager();
-
-                return function (hostname, sslSession) {
-                    try {
-                        const certs = sslSession.getPeerCertificates();
-
-                        // https://stackoverflow.com/a/70469741/68051
-                        const authType = "RSA";
-
-                        // This throws if the certificate isn't trusted (i.e. if it's
-                        // not signed by our extra CA specifically):
-                        trustManager.checkServerTrusted(certs, authType);
-
-                        // If the cert is from our CA, great! Skip hostname checks entirely.
-                        return true;
-                    } catch (e) {} // Ignore errors and fallback to default behaviour
-
-                    // We fallback to ensure that connections with other CAs (e.g. direct
-                    // connections allowed past the proxy) validate as normal.
-                    return targetMethod.call(this, ...arguments);
-                }
-            }
+            replacement: () => RETURN_TRUE
         }
     ],
 
@@ -859,7 +919,7 @@ const PINNING_FIXES = {
     'com.datatheorem.android.trustkit.pinning.PinningTrustManager': [
         {
             methodName: 'checkServerTrusted',
-            replacement: CHECK_OUR_TRUST_MANAGER_ONLY
+            replacement: TRUST_ALL_CERTS
         }
     ],
 
@@ -868,7 +928,7 @@ const PINNING_FIXES = {
     'appcelerator.https.PinningTrustManager': [
         {
             methodName: 'checkServerTrusted',
-            replacement: CHECK_OUR_TRUST_MANAGER_ONLY
+            replacement: TRUST_ALL_CERTS
         }
     ],
 
@@ -976,18 +1036,10 @@ const PINNING_FIXES = {
         {
             methodName: 'checkServerTrusted',
             overload: ['[Ljava.security.cert.X509Certificate;', 'java.lang.String'],
-            replacement: CHECK_OUR_TRUST_MANAGER_ONLY,
+            replacement: TRUST_ALL_CERTS,
             methodName: 'checkServerTrusted',
             overload: ['[Ljava.security.cert.X509Certificate;', 'java.lang.String', 'java.lang.String'],
-            replacement: () => {
-                const trustManager = getCustomX509TrustManager();
-                return (certs, authType, _hostname) => {
-                    // We ignore the hostname - if the certs are good (i.e they're ours), then the
-                    // whole chain is good to go.
-                    trustManager.checkServerTrusted(certs, authType);
-                    return Java.use('java.util.Arrays').asList(certs);
-                };
-            }
+            replacement: TRUST_ALL_CERTS_EXTENDED
         }
     ]
 
@@ -1002,7 +1054,7 @@ const getJavaClassIfExists = (clsName) => {
 }
 
 Java.perform(function () {
-    if (DEBUG_MODE) console.log('\n    === Disabling all recognized unpinning libraries ===');
+    if (DEBUG_MODE) log('\n    === Disabling all recognized unpinning libraries ===');
 
     const classesToPatch = Object.keys(PINNING_FIXES);
 
@@ -1011,7 +1063,7 @@ Java.perform(function () {
         if (!TargetClass) {
             // We skip patches for any classes that don't seem to be present. This is common
             // as not all libraries we handle are necessarily used.
-            if (DEBUG_MODE) console.log(`[ ] ${targetClassName} *`);
+            if (DEBUG_MODE) log(`[ ] ${targetClassName} *`);
             return;
         }
 
@@ -1061,7 +1113,7 @@ Java.perform(function () {
             // happen due to methods that only appear in certain library versions or whose signatures
             // have changed over time.
             if (targetMethodImplementations.length === 0) {
-                if (DEBUG_MODE) console.log(`[ ] ${targetClassName} ${methodDescription}`);
+                if (DEBUG_MODE) log(`[ ] ${targetClassName} ${methodDescription}`);
                 return;
             }
 
@@ -1075,32 +1127,32 @@ Java.perform(function () {
                     if (DEBUG_MODE) {
                         // Log each hooked method as it's called:
                         targetMethod.implementation = function () {
-                            console.log(` => ${patchName}`);
+                            log(` => ${patchName}`);
                             return newImplementation.apply(this, arguments);
                         }
                     } else {
                         targetMethod.implementation = newImplementation;
                     }
 
-                    if (DEBUG_MODE) console.log(`[+] ${patchName}`);
+                    if (DEBUG_MODE) log(`[+] ${patchName}`);
                     patchApplied = true;
                 } catch (e) {
                     // In theory, errors like this should never happen - it means the patch is broken
                     // (e.g. some dynamic patch building fails completely)
-                    console.error(`[!] ERROR: ${patchName} failed: ${e}`);
+                    logErr(`[!] ERROR: ${patchName} failed: ${e}`);
                 }
             })
         });
 
         if (!patchApplied) {
-            console.warn(`[!] Matched class ${targetClassName} but could not patch any methods`);
+            logWarn(`[!] Matched class ${targetClassName} but could not patch any methods`);
         }
     });
 
-    console.log('== Certificate unpinning completed ==');
+    log('== Certificate unpinning completed ==');
 });
 
-// Android SSL unpinning fallback
+// Android SSL unpinning fallback - MODIFIED: Accept all certificates
 // Capture the full fields or methods from a Frida class reference via JVM reflection:
 const getFields = (cls) => getFridaValues(cls, cls.class.getDeclaredFields());
 const getMethods = (cls) => getFridaValues(cls, cls.class.getDeclaredMethods());
@@ -1114,9 +1166,6 @@ const getFridaValues = (cls, values) => values.map((value) =>
 Java.perform(function () {
     try {
         const X509TrustManager = Java.use("javax.net.ssl.X509TrustManager");
-        const defaultTrustManager = getCustomX509TrustManager(); // Defined in the unpinning script
-        const certBytes = Java.use("java.lang.String").$new(CERT_PEM).getBytes();
-        const trustedCACert = buildX509CertificateFromBytes(certBytes); // Ditto
 
         const isX509TrustManager = (cls, methodName) =>
             methodName === 'checkServerTrusted' &&
@@ -1195,7 +1244,7 @@ Java.perform(function () {
         const buildUnhandledErrorPatcher = (errorClassName, originalConstructor) => {
             return function (errorArg) {
                 try {
-                    console.log('\n !!! --- Unexpected TLS failure --- !!!');
+                    log('\n !!! --- Unexpected TLS failure --- !!!');
 
                     // This may be a message, or an cause, or plausibly maybe other types? But
                     // stringifying gives something consistently message-shaped, so that'll do.
@@ -1212,15 +1261,15 @@ Java.perform(function () {
                     const methodName = callingFunctionStack.getMethodName();
 
                     const errorTypeName = errorClassName.split('.').slice(-1)[0];
-                    console.log(`      ${errorTypeName}: ${errorMessage}`);
-                    console.log(`      Thrown by ${className}->${methodName}`);
+                    log(`      ${errorTypeName}: ${errorMessage}`);
+                    log(`      Thrown by ${className}->${methodName}`);
 
                     const callingClass = Java.use(className);
                     const callingMethod = callingClass[methodName];
 
                     callingMethod.overloads.forEach((failingMethod) => {
                         if (failingMethod.implementation) {
-                            console.warn('      Already patched - but still failing!')
+                            logWarn('      Already patched - but still failing!')
                             return; // Already patched by Frida - skip it
                         }
 
@@ -1228,21 +1277,21 @@ Java.perform(function () {
                         if (isOkHttpCheckMethod(errorMessage, failingMethod)) {
                             // See okhttp3.CertificatePinner patches in unpinning script:
                             failingMethod.implementation = () => {
-                                if (DEBUG_MODE) console.log(` => Fallback OkHttp patch`);
+                                if (DEBUG_MODE) log(` => Fallback OkHttp patch`);
                             };
-                            console.log(`      [+] ${className}->${methodName} (fallback OkHttp patch)`);
+                            log(`      [+] ${className}->${methodName} (fallback OkHttp patch)`);
                         } else if (isAppmattusOkHttpInterceptMethod(errorMessage, failingMethod)) {
                             // See Appmattus CertificateTransparencyInterceptor patch in unpinning script:
                             const chainType = Java.use(failingMethod.argumentTypes[0].className);
                             const responseTypeName = failingMethod.returnType.className;
                             const okHttpChain = matchOkHttpChain(chainType, responseTypeName);
                             failingMethod.implementation = (chain) => {
-                                if (DEBUG_MODE) console.log(` => Fallback Appmattus+OkHttp patch`);
+                                if (DEBUG_MODE) log(` => Fallback Appmattus+OkHttp patch`);
                                 const proceed = chain[okHttpChain.proceedMethodName].bind(chain);
                                 const request = chain[okHttpChain.requestFieldName].value;
                                 return proceed(request);
                             };
-                            console.log(`      [+] ${className}->${methodName} (fallback Appmattus+OkHttp patch)`);
+                            log(`      [+] ${className}->${methodName} (fallback Appmattus+OkHttp patch)`);
                         } else if (isX509TrustManager(callingClass, methodName)) {
                             const argumentTypes = failingMethod.argumentTypes.map(t => t.className);
                             const returnType = failingMethod.returnType.className;
@@ -1252,60 +1301,41 @@ Java.perform(function () {
                                 argumentTypes.every((t, i) => t === BASE_METHOD_ARGUMENTS[i]) &&
                                 returnType === 'void'
                             ) {
-                                // For the base method, just check against the default:
-                                failingMethod.implementation = (certs, authType) => {
-                                    if (DEBUG_MODE) console.log(` => Fallback X509TrustManager patch of ${
+                                // MODIFIED: Just accept everything
+                                failingMethod.implementation = (_certs, _authType) => {
+                                    if (DEBUG_MODE) log(` => Fallback X509TrustManager patch of ${
                                         className
-                                    } base method`);
-
-                                    const defaultTrustManager = getCustomX509TrustManager(); // Defined in the unpinning script
-                                    defaultTrustManager.checkServerTrusted(certs, authType);
+                                    } base method - accepting all`);
                                 };
-                                console.log(`      [+] ${className}->${methodName} (fallback X509TrustManager base patch)`);
+                                log(`      [+] ${className}->${methodName} (fallback X509TrustManager base patch - trust all)`);
                             } else if (
                                 argumentTypes.length === 3 &&
                                 argumentTypes.every((t, i) => t === EXTENDED_METHOD_ARGUMENTS[i]) &&
                                 returnType === 'java.util.List'
                             ) {
-                                // For the extended method, we just ignore the hostname, and if the certs are good
-                                // (i.e they're ours), then we say the whole chain is good to go:
-                                failingMethod.implementation = function (certs, authType, _hostname) {
-                                    if (DEBUG_MODE) console.log(` => Fallback X509TrustManager patch of ${
+                                // MODIFIED: Accept everything and return the certs
+                                failingMethod.implementation = function (certs, _authType, _hostname) {
+                                    if (DEBUG_MODE) log(` => Fallback X509TrustManager patch of ${
                                         className
-                                    } extended method`);
-
-                                    try {
-                                        defaultTrustManager.checkServerTrusted(certs, authType);
-                                    } catch (e) {
-                                        console.error('Default TM threw:', e);
-                                    }
+                                    } extended method - accepting all`);
                                     return Java.use('java.util.Arrays').asList(certs);
                                 };
-                                console.log(`      [+] ${className}->${methodName} (fallback X509TrustManager ext patch)`);
+                                log(`      [+] ${className}->${methodName} (fallback X509TrustManager ext patch - trust all)`);
                             } else {
-                                console.warn(`      [ ] Skipping unrecognized checkServerTrusted signature in class ${
+                                logWarn(`      [ ] Skipping unrecognized checkServerTrusted signature in class ${
                                     callingClass.class.getName()
                                 }`);
                             }
                         } else if (isMetaPinningMethod(errorMessage, failingMethod)) {
-                            failingMethod.implementation = function (certs) {
-                                if (DEBUG_MODE) console.log(` => Fallback patch for meta proxygen pinning`);
-                                for (const cert of certs.toArray()) {
-                                    if (cert.equals(trustedCACert)) {
-                                        return; // Our own cert - all good
-                                    }
-                                }
-
-                                if (DEBUG_MODE) {
-                                    console.warn(' Meta unpinning fallback found only untrusted certificates');
-                                }
-                                // Fall back to normal logic, in case of passthrough or similar
-                                return failingMethod.call(this, certs);
+                            // MODIFIED: Accept all certificates
+                            failingMethod.implementation = function (_certs) {
+                                if (DEBUG_MODE) log(` => Fallback patch for meta proxygen pinning - accepting all`);
+                                return; // Accept everything
                             }
 
-                            console.log(`      [+] ${className}->${methodName} (Meta proxygen pinning fallback patch)`);
+                            log(`      [+] ${className}->${methodName} (Meta proxygen pinning fallback patch - trust all)`);
                         } else {
-                            console.error('      [ ] Unrecognized TLS error - this must be patched manually');
+                            logErr('      [ ] Unrecognized TLS error - this must be patched manually');
                             return;
                             // Later we could try to cover other cases here - automatically recognizing other
                             // OkHttp interceptors for example, or potentially other approaches, but we need
@@ -1313,8 +1343,8 @@ Java.perform(function () {
                         }
                     });
                 } catch (e) {
-                    console.log('      [ ] Failed to automatically patch failure');
-                    console.warn(e);
+                    log('      [ ] Failed to automatically patch failure');
+                    logWarn(e);
                 }
 
                 return originalConstructor.call(this, ...arguments);
@@ -1335,10 +1365,10 @@ Java.perform(function () {
             });
         })
 
-        console.log('== Unpinning fallback auto-patcher installed ==');
+        log('== Unpinning fallback auto-patcher installed ==');
     } catch (err) {
-        console.error(err);
-        console.error(' !!! --- Unpinning fallback auto-patcher installation failed --- !!!');
+        logErr(err);
+        logErr(' !!! --- Unpinning fallback auto-patcher installation failed --- !!!');
     }
 
 });

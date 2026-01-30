@@ -1,12 +1,12 @@
 import { ensureTrailingSlash } from "./utils";
 import { signDerCertficate } from "./const/cert";
 
-declare const __BACKEND_URL__: string;
+declare const __SERVER_URI__: string;
 declare const __NODE_ENV__: string;
 declare const __DEVICE_PATH__: string;
 
 export const config = {
-  backendUrl: ensureTrailingSlash(__BACKEND_URL__),
+  serverUri: ensureTrailingSlash(__SERVER_URI__),
   nodeEnv: __NODE_ENV__,
   isDev: __NODE_ENV__ === 'development',
   devicePath: ensureTrailingSlash(__DEVICE_PATH__),
@@ -51,7 +51,7 @@ export function sanitizeProxyConfig(proxy: ProxyConfig): ProxyConfig {
 
 export async function loadAutoConfiguration(): Promise<ProxyConfig | null> {
   try {
-    const response = await fetch(config.backendUrl + config.autoConfigUrl);
+    const response = await fetch(config.serverUri + config.autoConfigUrl);
     if (!response.ok) {
       console.log('No auto-configuration file found');
       return null;

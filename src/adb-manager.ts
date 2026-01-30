@@ -109,7 +109,7 @@ export class AdbManager {
     file: string
   ): Promise<PushResult> {
     try {
-      const url = config.backendUrl + 'static/' + file;
+      const url = config.serverUri + 'static/' + file;
       const destination = config.devicePath + file;
       const status = await this.adbRun(["ls", destination]);
       if (status.exitCode === 0) {

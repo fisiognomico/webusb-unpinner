@@ -61,8 +61,8 @@ module.exports = {
       template: './src/index.html'
     }),
     new webpack.DefinePlugin({
-      __BACKEND_URL__: JSON.stringify(
-        process.env.BACKEND_URL || 'http://localhost:9000/'
+      __SERVER_URI__: JSON.stringify(
+        process.env.SERVER_URI || 'http://localhost:9000/'
       ),
       __NODE_ENV__: JSON.stringify(process.env.NODE_ENV || 'development'),
       __DEVICE_PATH__: JSON.stringify(process.env.DEVICE_PATH || '/data/local/tmp/'),
