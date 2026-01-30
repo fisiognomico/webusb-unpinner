@@ -35,10 +35,14 @@ A browser-based Android HTTPS unpinning and instrumentation framework. **No back
 - **Developer mode** enabled
 - **USB debugging** enabled
 - **WebUSB permissions** granted
+To know more about enabling developer mode, consult [Android documentation](https://developer.android.com/studio/debug/dev-options).
 
 ### Development Machine
 - **Node.js** 16+
 - **npm** or **yarn**
+- [**git**](https://git-scm.com/install/)
+  
+If you've never used node.js or npm, consult their [website](https://nodejs.org/en/learn/getting-started/introduction-to-nodejs) to learn how to install them on your machine.
 
 ## Quick Start
 
